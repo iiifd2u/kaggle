@@ -8,21 +8,27 @@ from torch.nn import Module
 from torch.nn import Linear, Softmax, Dropout, CrossEntropyLoss, Sequential
 from torch.utils.data import random_split, DataLoader
 from torch.optim import Adam
+
 from sklearn.metrics import classification_report
+from numba import jit
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Работаем на {device}")
-
-transforms = Compose([ToTensor(), Lambda(lambd=lambda x:hog(x, 7, 2))])
 
 learning_rate = 1e-3
 batch_size = 64
 epochs = 10
 train_split = 0.75
 val_split = 1 - train_split
+dropout_coef = 0.2
+block_size = 7
+norm_size = 2
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Работаем на {device}")
+
+transforms = Compose([ToTensor(), Lambda(lambd=lambda x:hog(x))])
 
 train_data = MNIST(root="dataset", train=True, download=True, transform=transforms)
-test_data = MNIST(root="dataset", train=False, download=True, transform=transforms)
+test_data = MNIST(root="dataset", train=False, download=True, transform=ToTensor())
 
 num_train_samples = int(len(train_data)*train_split)
 num_val_samples = int(len(train_data)*val_split)
@@ -45,53 +51,55 @@ class OneLayer(Module):
 		super().__init__()
 		self.net = Sequential(
 			Linear(in_features=324, out_features=n_classes),
-			Dropout(0.2),
-			Softmax()
+			Dropout(0.2)
 		)
 
 	def forward(self, x):
 		out = self.net(x)
 		return out
 
+@jit(nopython=True)
+def get_summary(step_x, step_y, angle):
+	return [[calc_36(x_pos, y_pos, angle) for x_pos in range(step_x)] for y_pos in range(step_y)]
 
-def hog(img: torch.Tensor, block_size: int, norm_size: int):
+@jit(nopython=True)
+def calc_36(pos_x, pos_y, angle):
+	"""Считает один нормализованный блок"""
+	block = []
+	for num_x in range(norm_size):
+		for num_y in range(norm_size):
 
+			histogram = [0 for _ in range(9)]
+
+			for i in range(block_size):
+				for j in range(block_size):
+					el = angle[pos_x * block_size + num_x * norm_size + i][pos_y * block_size + num_y * norm_size + j]
+					hist_idx = el // 20
+					hist_idx_next = (hist_idx + 1) % 9
+					coef = el / 20 - hist_idx
+					histogram[hist_idx] += el * coef
+					histogram[hist_idx_next] += el * (1 - coef)
+			block.append(histogram)
+	out_36 = np.array(block).flatten()
+	return out_36 / (np.sqrt(np.sum(np.square(out_36)))+ 0.0001)
+
+
+def hog(img: torch.Tensor):
+	"""Имплементация алгоритма hog с другими параметрами"""
 	img = img.to(torch.float32).numpy().astype(np.float32).reshape((28, 28))
 	img = img / 225.0
 	gx = cv2.Sobel(img, cv2.CV_32F, 1, 0, ksize=1)
 	gy = cv2.Sobel(img, cv2.CV_32F, 0, 1, ksize=1)
 	mag, angle = cv2.cartToPolar(gx, gy, angleInDegrees=True)
 
-	angle = np.where(angle>=180, angle-180, angle)
+	angle = np.where(angle>=180, angle-180, angle).astype(np.uint8)
 	w, h = img.shape
 
 	step_x = w//(block_size)-1
 	step_y = h // (block_size)-1
 
-	#Едет нормировочный блок 2хх
-	output = np.array([])
-	for i_norm in range(step_x):
-		for j_norm in range(step_y):
-
-			# Внутри него едет блок 1х1
-			vector = []
-			for num_x in range(norm_size):
-				for num_y in range(norm_size):
-
-					histogram = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 0}
-					# внутри блока берём координаты
-
-					for i in range(block_size):
-						for j in range(block_size):
-							el = angle[i_norm*block_size+num_x*norm_size+i][j_norm*block_size+num_y*norm_size+j]
-							hist_idx = el//20
-							hist_idx_next = (hist_idx+1)%9
-							coef = el/20 - hist_idx
-							histogram[hist_idx]+= el*coef
-							histogram[hist_idx_next] += el * (1-coef)
-					vector+=histogram.values()
-			vector = np.array(vector) / (np.linalg.norm(vector, 2)+0.001)
-			output = np.concatenate([output, vector], axis=-1)
+	summary = get_summary(step_x,step_y, angle)
+	output = np.array(summary).flatten()
 
 	return torch.from_numpy(output).to(torch.float32)
 
@@ -128,7 +136,7 @@ if __name__ == '__main__':
 			for (x, y) in val_data_loader:
 				(x, y) = (x.to(device), y.to(device))
 				pred = model(x)
-				total_val_loss += CrossEntropyLoss(pred, y)
+				total_val_loss += CrossEntropyLoss()(pred, y)
 
 				val_correct += (pred.argmax(1) == y).type(torch.float64).sum().item()
 
@@ -144,18 +152,18 @@ if __name__ == '__main__':
 		print("Val loss: {:.4f}, Val accuracy: {:.4f}\n".format(
 			avg_val_loss, val_correct))
 
-	with torch.no_grad():
-		model.eval()
-		preds = []
-
-		for (x, y) in test_data_loader:
-			x = x.to(device)
-			pred = model(x)
-			preds.extend(pred.argmax(axis=1).cpu().numpy())
-
-	print(classification_report(test_data.targets.cpu().numpy(),
-								np.array(preds), target_names=test_data.classes))
-
+	# with torch.no_grad():
+	# 	model.eval()
+	# 	preds = []
+	#
+	# 	for (x, y) in test_data_loader:
+	# 		x = x.to(device)
+	# 		pred = model(x)
+	# 		preds.extend(pred.argmax(axis=1).cpu().numpy())
+	#
+	# print(classification_report(test_data.targets.cpu().numpy(),
+	# 							np.array(preds), target_names=test_data.classes))
+	#
 	path = os.path.join("dataset", "MNIST", "state_dict")
 	os.makedirs(path, exist_ok=True)
 
