@@ -14,5 +14,5 @@ HOG формирует вектор признаков, сеть обучает�
 
 **Визуальная интерпретация работы HOG:**
 
-![](https://github.com/iiifd2u/kaggle/tree/main/Digit%20Recognition/records/0.jpg)
-![](https://github.com/iiifd2u/kaggle/tree/main/Digit%20Recognition/records/0.jpg)
+![](https://github.com/iiifd2u/kaggle/tree/main/Digit%20Recognition/records/0.JPG)
+![](https://github.com/iiifd2u/kaggle/tree/main/Digit%20Recognition/records/0.JPG)
